@@ -15,6 +15,7 @@
 package outlinecaddy
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -123,7 +124,7 @@ func (h WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 	var conn net.Conn
 	switch h.Type {
 	case StreamConnectionType:
-		streamConn, err := websocket.Upgrade(w, r, nil)
+		streamConn, err := websocket.Upgrade(webSocketResponseWriter{w}, r, nil)
 		if err != nil {
 			h.logger.Error("failed to upgrade stream WebSocket", "err", err)
 			return nil
@@ -152,6 +153,20 @@ func (h WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 	cx := layer4.WrapConnection(conn, []byte{}, h.zlogger)
 	cx.SetVar(outlineConnectionTypeCtxKey, h.Type)
 	return h.compiledHandler.Handle(cx, nil)
+}
+
+// webSocketResponseWriter exposes the Hijacker interface required by the SDK
+// through Caddy's supported response-writer unwrapping path.
+type webSocketResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (w webSocketResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w webSocketResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func requestClientIP(r *http.Request) net.IP {
