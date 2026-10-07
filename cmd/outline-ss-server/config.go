@@ -52,6 +52,11 @@ type WebServerConfig struct {
 
 	// List of listener addresses (e.g., ":8080", "localhost:8081"). Should be localhost for HTTP.
 	Listeners []string `yaml:"listen"`
+
+	// TLSCertFile and TLSKeyFile identify a PEM certificate chain and its private key.
+	// When both are set, the web server terminates TLS with these files.
+	TLSCertFile string `yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `yaml:"tls_key_file,omitempty"`
 }
 
 // ListenerConfig holds the configuration for a listener.  It supports different
@@ -210,6 +215,9 @@ func (c *Config) validate() error {
 	for _, srv := range c.Web.Servers {
 		if srv.ID == "" {
 			return fmt.Errorf("web server must have an ID")
+		}
+		if (srv.TLSCertFile == "") != (srv.TLSKeyFile == "") {
+			return fmt.Errorf("web server `%s` must specify both tls_cert_file and tls_key_file", srv.ID)
 		}
 		for _, addr := range srv.Listeners {
 			if err := validateAddress(addr); err != nil {

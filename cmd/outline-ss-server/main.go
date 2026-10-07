@@ -38,6 +38,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/term"
 
+	"github.com/Jigsaw-Code/outline-ss-server/internal/packetwebsocket"
 	"github.com/Jigsaw-Code/outline-ss-server/ipinfo"
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
 	outline_prometheus "github.com/Jigsaw-Code/outline-ss-server/prometheus"
@@ -200,6 +201,11 @@ func (ls *listenerSet) Len() int {
 }
 
 func (s *OutlineServer) runConfig(config Config) (func() error, error) {
+	tlsConfigs, err := loadWebServerTLSConfigs(config.Web.Servers)
+	if err != nil {
+		return nil, err
+	}
+
 	startErrCh := make(chan error)
 	stopErrCh := make(chan error)
 	stopCh := make(chan struct{})
@@ -215,7 +221,11 @@ func (s *OutlineServer) runConfig(config Config) (func() error, error) {
 
 		startErrCh <- func() error {
 			// Start configured web servers.
-			webServers := make(map[string]*http.ServeMux)
+			type webServer struct {
+				mux       *http.ServeMux
+				nativeTLS bool
+			}
+			webServers := make(map[string]webServer)
 			for _, srvConfig := range config.Web.Servers {
 				if _, exists := webServers[srvConfig.ID]; exists {
 					return fmt.Errorf("web server with ID `%s` already exists", srvConfig.ID)
@@ -223,20 +233,29 @@ func (s *OutlineServer) runConfig(config Config) (func() error, error) {
 				mux := http.NewServeMux()
 				for _, addr := range srvConfig.Listeners {
 					server := &http.Server{Addr: addr, Handler: mux}
+					if tlsConfig := tlsConfigs[srvConfig.ID]; tlsConfig != nil {
+						server.TLSConfig = tlsConfig.Clone()
+					}
 					ln, err := lnSet.ListenStream(addr)
 					if err != nil {
 						return fmt.Errorf("failed to listen on %s: %w", addr, err)
 					}
 					go func() {
 						defer server.Shutdown(context.Background())
-						err := server.Serve(&HTTPStreamListener{ln})
+						streamListener := &HTTPStreamListener{ln}
+						var err error
+						if server.TLSConfig != nil {
+							err = server.ServeTLS(streamListener, "", "")
+						} else {
+							err = server.Serve(streamListener)
+						}
 						if err != nil && !errors.Is(http.ErrServerClosed, err) && !errors.Is(net.ErrClosed, err) {
 							slog.Error("Failed to run web server.", "err", err, "ID", srvConfig.ID)
 						}
 					}()
 					slog.Info("Web server started.", "ID", srvConfig.ID, "address", addr)
 				}
-				webServers[srvConfig.ID] = mux
+				webServers[srvConfig.ID] = webServer{mux: mux, nativeTLS: tlsConfigs[srvConfig.ID] != nil}
 			}
 
 			// Start legacy services.
@@ -339,7 +358,8 @@ func (s *OutlineServer) runConfig(config Config) (func() error, error) {
 						if _, exists := webServers[cfg.WebsocketStream.WebServer]; !exists {
 							return fmt.Errorf("websocket-stream listener references unknown web server `%s`", cfg.WebsocketStream.WebServer)
 						}
-						mux := webServers[cfg.WebsocketStream.WebServer]
+						webServer := webServers[cfg.WebsocketStream.WebServer]
+						mux := webServer.mux
 						handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 							conn, err := websocket.Upgrade(w, r, nil)
 							if err != nil {
@@ -354,28 +374,38 @@ func (s *OutlineServer) runConfig(config Config) (func() error, error) {
 							}
 							streamHandler.HandleStream(r.Context(), conn, s.serviceMetrics.AddOpenTCPConnection(conn))
 						})
-						mux.Handle(cfg.WebsocketStream.Path, http.StripPrefix(cfg.WebsocketStream.Path, handlers.ProxyHeaders(handler)))
+						var websocketHandler http.Handler = handler
+						if !webServer.nativeTLS {
+							websocketHandler = handlers.ProxyHeaders(websocketHandler)
+						}
+						mux.Handle(cfg.WebsocketStream.Path, http.StripPrefix(cfg.WebsocketStream.Path, websocketHandler))
 						logger.Info("WebSocket stream service started.", "ID", cfg.WebsocketStream.WebServer, "path", cfg.WebsocketStream.Path)
 					} else if cfg.WebsocketPacket != nil {
 						if _, exists := webServers[cfg.WebsocketPacket.WebServer]; !exists {
 							return fmt.Errorf("websocket-packet listener references unknown web server `%s`", cfg.WebsocketPacket.WebServer)
 						}
-						mux := webServers[cfg.WebsocketPacket.WebServer]
+						webServer := webServers[cfg.WebsocketPacket.WebServer]
+						mux := webServer.mux
 						handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							conn, err := websocket.Upgrade(w, r, nil)
+							clientAddrPort, err := onet.ParseAddrPortOrIP(r.RemoteAddr)
+							if err != nil {
+								http.Error(w, "invalid client address", http.StatusBadRequest)
+								return
+							}
+							remoteAddr := net.UDPAddrFromAddrPort(clientAddrPort)
+							conn, err := packetwebsocket.Upgrade(w, r, webServer.nativeTLS, remoteAddr)
 							if err != nil {
 								slog.Error("failed to upgrade", "err", err)
 								return
 							}
 							defer conn.Close()
-							// RemoteAddr is "IP:port" for direct connections, but may be just "IP" when proxied.
-							clientAddrPort, err := onet.ParseAddrPortOrIP(r.RemoteAddr)
-							if err == nil {
-								conn = &replaceAddrConn{StreamConn: conn, raddr: net.UDPAddrFromAddrPort(clientAddrPort)}
-							}
 							associationHandler.HandleAssociation(r.Context(), conn, s.serviceMetrics.AddOpenUDPAssociation(conn))
 						})
-						mux.Handle(cfg.WebsocketPacket.Path, http.StripPrefix(cfg.WebsocketPacket.Path, handlers.ProxyHeaders(handler)))
+						var websocketHandler http.Handler = handler
+						if !webServer.nativeTLS {
+							websocketHandler = handlers.ProxyHeaders(websocketHandler)
+						}
+						mux.Handle(cfg.WebsocketPacket.Path, http.StripPrefix(cfg.WebsocketPacket.Path, websocketHandler))
 						logger.Info("WebSocket packet service started.", "ID", cfg.WebsocketPacket.WebServer, "path", cfg.WebsocketPacket.Path)
 					} else {
 						return fmt.Errorf("unknown listener configuration: %v", cfg)
@@ -392,7 +422,7 @@ func (s *OutlineServer) runConfig(config Config) (func() error, error) {
 		<-stopCh
 	}()
 
-	err := <-startErrCh
+	err = <-startErrCh
 	if err != nil {
 		return nil, err
 	}
