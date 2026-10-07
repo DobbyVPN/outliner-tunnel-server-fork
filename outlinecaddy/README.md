@@ -31,6 +31,14 @@ go test -race ./...
 
 The tests cover WebSocket packet boundaries, fragmented messages, invalid messages, TLS record boundaries, listener wrapper provisioning, multiple listeners, configuration reload instances, and concurrent listener wrapping.
 
+Run the full compatibility review, including isolated clients built against the released and stock SDK manifests and a real loopback Caddy/TLS regression fixture, with:
+
+```sh
+./scripts/review.sh
+```
+
+The review script builds Caddy with Go 1.26.8 and the clients with Go 1.25.5 (downloaded by Go's toolchain selector if needed). It runs the integration and unit suite under the race detector.
+
 ## Dependency verification note
 
 The inherited zip checksum for `github.com/google/go-tpm-tools v0.4.8` (`h1:q8LRQwaO79qVNywF/Hu38aI/+xRjAOPAp0CnMYU7Sro=`) did not match the signed checksum (`h1:V4oIYyAD3BykOycwYQzO29WefDouQMTsYZqmG3HxOfM=`) in [sum.golang.org](https://sum.golang.org/lookup/github.com/google/go-tpm-tools@v0.4.8). The stale line was replaced after Go verified the official checksum; sumdb verification remains enabled. Caddy v2.11.7 requires Go 1.26.0 and its newer transitive dependency graph, so `go mod tidy` updates the necessary indirect module versions while preserving the plugin's SDK and Outline server pins.
