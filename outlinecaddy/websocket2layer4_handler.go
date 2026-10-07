@@ -21,12 +21,13 @@ import (
 	"net"
 	"net/http"
 
-	"golang.getoutline.org/sdk/transport"
-	"golang.getoutline.org/sdk/x/websocket"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/mholt/caddy-l4/layer4"
 	"go.uber.org/zap"
+	"golang.getoutline.org/sdk/transport"
+	"golang.getoutline.org/sdk/x/websocket"
+	"golang.getoutline.org/tunnel-server/outlinecaddy/internal/packetwebsocket"
 )
 
 const wsModuleName = "http.handlers.websocket2layer4"
@@ -119,24 +120,51 @@ func (h WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 		slog.String("path", r.URL.Path),
 		slog.Any("remote_addr", r.RemoteAddr))
 
-	conn, err := websocket.Upgrade(w, r, nil)
-	if err != nil {
-		h.logger.Error("failed to upgrade", "err", err)
+	var conn net.Conn
+	switch h.Type {
+	case StreamConnectionType:
+		streamConn, err := websocket.Upgrade(w, r, nil)
+		if err != nil {
+			h.logger.Error("failed to upgrade stream WebSocket", "err", err)
+			return nil
+		}
+		conn = streamConn
+		if clientIP := requestClientIP(r); clientIP != nil {
+			conn = &replaceAddrConn{StreamConn: streamConn, raddr: &net.TCPAddr{IP: clientIP}}
+		}
+	case PacketConnectionType:
+		if r.TLS != nil && !packetTLSRecordSizingEnabled(r) {
+			h.logger.Error("packet WebSocket TLS requires the outline_packet_tls listener wrapper")
+			http.Error(w, "packet WebSocket TLS listener is not configured for packet compatibility", http.StatusInternalServerError)
+			return nil
+		}
+		remoteAddr := &net.UDPAddr{IP: requestClientIP(r)}
+		var err error
+		conn, err = packetwebsocket.Upgrade(w, r, remoteAddr)
+		if err != nil {
+			h.logger.Error("failed to upgrade packet WebSocket", "err", err)
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported connection type %q", h.Type)
 	}
 	defer conn.Close()
-	if clientIpStr, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok {
-		if clientIp := net.ParseIP(clientIpStr); clientIp != nil {
-			switch h.Type {
-			case StreamConnectionType:
-				conn = &replaceAddrConn{StreamConn: conn, raddr: &net.TCPAddr{IP: clientIp}}
-			case PacketConnectionType:
-				conn = &replaceAddrConn{StreamConn: conn, raddr: &net.UDPAddr{IP: clientIp}}
-			}
-		}
-	}
 	cx := layer4.WrapConnection(conn, []byte{}, h.zlogger)
 	cx.SetVar(outlineConnectionTypeCtxKey, h.Type)
 	return h.compiledHandler.Handle(cx, nil)
+}
+
+func requestClientIP(r *http.Request) net.IP {
+	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok {
+		if parsed := net.ParseIP(clientIP); parsed != nil {
+			return parsed
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return net.ParseIP(host)
+	}
+	return net.ParseIP(r.RemoteAddr)
 }
 
 // TODO: Create a dedicated `ClientConn` struct with `ClientAddr` and `Conn`.
