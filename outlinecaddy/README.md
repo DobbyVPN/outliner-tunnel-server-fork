@@ -18,6 +18,8 @@ The example includes both an Outline stream route and packet route, an account f
 
 The `outline_packet_tls` listener wrapper must appear before Caddy's `tls` wrapper. It sets `DynamicRecordSizingDisabled` on every TLS connection policy for that HTTP server, which keeps each packet WebSocket header and payload in separate TLS application records for released Outline clients. Keep the server protocols at `h1` and `h2`; WebSocket upgrades use HTTP/1.1, and HTTP/3 is not enabled by this configuration. Packet WebSockets over plain HTTP do not require this TLS wrapper.
 
+TLS packet responses are limited to 16 KiB per encrypted packet so their payload fits in one TLS application record; larger responses return a short-buffer error without sending a partial packet. Incoming WebSocket messages are limited to 64 KiB. The listener setting applies to all HTTPS routes on that HTTP server, including its static file routes.
+
 The adapter derives the client's address from Caddy's client IP variable, falling back to the request's remote address. If Caddy is behind a reverse proxy, configure trusted proxies with only that proxy's address ranges before accepting forwarded client IP headers.
 
 ## Tests
