@@ -108,6 +108,18 @@ web:
 				errStr: "invalid listener for web server `foo`",
 			},
 			{
+				name: "WebServerMissingTLSKey",
+				yaml: `
+web:
+  servers:
+    - id: tls_web_server
+      listen:
+        - "127.0.0.1:8000"
+      tls_cert_file: "/tmp/fullchain.pem"
+`,
+				errStr: "must specify both tls_cert_file and tls_key_file",
+			},
+			{
 				name: "WebsocketMissingWebServer",
 				yaml: `
 services:
@@ -160,6 +172,8 @@ web:
     - id: my_web_server
       listen:
         - "127.0.0.1:8000"
+      tls_cert_file: "/tmp/fullchain.pem"
+      tls_key_file: "/tmp/privkey.pem"
 
 services:
   - listeners:
