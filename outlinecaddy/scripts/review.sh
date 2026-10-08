@@ -54,10 +54,10 @@ echo "review: building Caddy v2.11.7 with the Outline modules"
 (
 	cd "${MODULE_DIR}"
 	GOTOOLCHAIN=local "${GO_BIN}" build -mod=readonly -tags=nomysql \
-		-ldflags='-X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.7-dbby' \
+		-ldflags='-X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.7-r2-dbby' \
 		-o "${CADDY_BINARY}" ./cmd/caddy
 )
-if [[ "$("${CADDY_BINARY}" version | awk '{print $1}')" != "v2.11.7-dbby" ]]; then
+if [[ "$("${CADDY_BINARY}" version | awk '{print $1}')" != "v2.11.7-r2-dbby" ]]; then
 	echo "review: built Caddy binary does not report the requested custom version" >&2
 	exit 1
 fi

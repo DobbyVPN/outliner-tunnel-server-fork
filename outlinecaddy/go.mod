@@ -10,11 +10,12 @@ require (
 	github.com/iamd3vil/caddy_yaml_adapter v0.0.0-20200503183711-d479c29b475a
 	github.com/mholt/caddy-l4 v0.1.2
 	github.com/prometheus/client_golang v1.24.1
+	github.com/shadowsocks/go-shadowsocks2 v0.1.5
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.28.0
 	golang.getoutline.org/sdk v0.0.23
 	golang.getoutline.org/sdk/x v0.2.0
-	golang.getoutline.org/tunnel-server v1.9.3-rc2
+	golang.getoutline.org/tunnel-server v1.9.3-rc2.0.20260904072137-2e9909e67173
 )
 
 require (
@@ -109,7 +110,6 @@ require (
 	github.com/quic-go/quic-go v0.63.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/shadowsocks/go-shadowsocks2 v0.1.5 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect

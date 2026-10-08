@@ -1082,8 +1082,8 @@ golang.getoutline.org/sdk v0.0.23 h1:UKoKCrRH3Ed6Jpg8ODYwOo6O1B1lvfIHPreMrTkSTcc
 golang.getoutline.org/sdk v0.0.23/go.mod h1:nKZlO//e/sRFk+rp8gm8EJ5RasDSyY+fGDNSd3I2iaA=
 golang.getoutline.org/sdk/x v0.2.0 h1:4kuT2SgkPXktwPwT6CXuF+Jwe+COAGqiBDZbgJkS5fM=
 golang.getoutline.org/sdk/x v0.2.0/go.mod h1:vyWoHW0PUsnRHdLXiDGv1Z8X48Asp2ALgwIQfJfAaNs=
-golang.getoutline.org/tunnel-server v1.9.3-rc2 h1:y1veksOBtBjxbY60MnDOrWcxspmeUV8ArNd1oVV+btE=
-golang.getoutline.org/tunnel-server v1.9.3-rc2/go.mod h1:Z9i9A//RXuFZSDE7QDZCC6GI0uqh21juWMPHpagaEFI=
+golang.getoutline.org/tunnel-server v1.9.3-rc2.0.20260904072137-2e9909e67173 h1:F323q+yjEb6O9/9ahAWYtv8h029JlWVY5SR8pDCUB2g=
+golang.getoutline.org/tunnel-server v1.9.3-rc2.0.20260904072137-2e9909e67173/go.mod h1:Z9i9A//RXuFZSDE7QDZCC6GI0uqh21juWMPHpagaEFI=
 golang.org/x/build v0.0.0-20190111050920-041ab4dc3f9d/go.mod h1:OWs+y06UdEOHN4y+MfF/py+xQ/tYqIWW03b70/CG9Rw=
 golang.org/x/crypto v0.0.0-20180621125126-a49355c7e3f8/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
 golang.org/x/crypto v0.0.0-20180904163835-0709b304e793/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
