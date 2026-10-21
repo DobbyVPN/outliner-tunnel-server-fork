@@ -151,8 +151,18 @@ func (h WebSocketHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ ca
 	}
 	defer conn.Close()
 	cx := layer4.WrapConnection(conn, []byte{}, h.zlogger)
+	if h.Type == PacketConnectionType {
+		cx.Context = contextWithUDPTransport(cx.Context, websocketPacketTransport(r))
+	}
 	cx.SetVar(outlineConnectionTypeCtxKey, h.Type)
 	return h.compiledHandler.Handle(cx, nil)
+}
+
+func websocketPacketTransport(r *http.Request) string {
+	if r.TLS != nil {
+		return "wss"
+	}
+	return "ws"
 }
 
 // webSocketResponseWriter exposes the Hijacker interface required by the SDK

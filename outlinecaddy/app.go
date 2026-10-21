@@ -31,9 +31,10 @@ import (
 )
 
 const (
-	outlineModuleName              = "outline"
-	replayCacheCtxKey caddy.CtxKey = "outline.replay_cache"
-	metricsCtxKey     caddy.CtxKey = "outline.metrics"
+	outlineModuleName                 = "outline"
+	replayCacheCtxKey    caddy.CtxKey = "outline.replay_cache"
+	metricsCtxKey        caddy.CtxKey = "outline.metrics"
+	udpDiagnosticsCtxKey caddy.CtxKey = "outline.udp_diagnostics"
 )
 
 func init() {
@@ -59,6 +60,7 @@ type OutlineApp struct {
 	logger      *slog.Logger
 	replayCache *outline.ReplayCache
 	metrics     outline.ServiceMetrics
+	diagnostics *udpDiagnostics
 	buildInfo   *prometheus.GaugeVec
 }
 
@@ -88,12 +90,22 @@ func (app *OutlineApp) Provision(ctx caddy.Context) error {
 	if err := app.defineMetrics(ctx.GetMetricsRegistry()); err != nil {
 		app.logger.Error("failed to define Prometheus metrics", "err", err)
 	}
-	// TODO: Set version at build time.
-	app.buildInfo.WithLabelValues("dev").Set(1)
+	build := readBuildMetadata()
+	app.buildInfo.WithLabelValues(build.buildVersion).Set(1)
+	app.logger.Info("Outline build information",
+		"build_module", build.buildModule,
+		"build_version", build.buildVersion,
+		"build_revision", build.buildRevision,
+		"go_version", build.goVersion,
+		"caddy_version", build.caddyVersion,
+		"effective_core_module", build.coreModule,
+		"effective_core_version", build.coreVersion,
+	)
 	// TODO: Add replacement metrics for `shadowsocks_keys` and `shadowsocks_ports`.
 
 	ctx = ctx.WithValue(replayCacheCtxKey, app.replayCache)
 	ctx = ctx.WithValue(metricsCtxKey, app.metrics)
+	ctx = ctx.WithValue(udpDiagnosticsCtxKey, app.diagnostics)
 
 	err := app.Handlers.Provision(ctx)
 	if err != nil {
@@ -122,6 +134,10 @@ func (app *OutlineApp) defineMetrics(metricsRegistry prometheus.Registerer) erro
 		return err
 	}
 	app.metrics, err = registerCollector(r, metrics)
+	if err != nil {
+		return err
+	}
+	app.diagnostics, err = registerCollector(r, newUDPDiagnostics())
 	if err != nil {
 		return err
 	}

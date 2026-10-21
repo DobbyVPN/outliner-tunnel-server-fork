@@ -25,6 +25,7 @@ import (
 	"golang.getoutline.org/sdk/transport"
 	"golang.getoutline.org/sdk/transport/shadowsocks"
 
+	onet "golang.getoutline.org/tunnel-server/net"
 	outline "golang.getoutline.org/tunnel-server/service"
 )
 
@@ -59,6 +60,7 @@ type ShadowsocksHandler struct {
 	streamHandler      outline.StreamHandler
 	associationHandler outline.AssociationHandler
 	metrics            outline.ServiceMetrics
+	diagnostics        *udpDiagnostics
 	logger             *slog.Logger
 }
 
@@ -109,13 +111,23 @@ func (h *ShadowsocksHandler) Provision(ctx caddy.Context) error {
 	if !ok {
 		h.logger.Warn("Handler configured outside Outline app; metrics not available.")
 	}
+	h.diagnostics, _ = ctx.Value(udpDiagnosticsCtxKey).(*udpDiagnostics)
 
-	h.streamHandler, h.associationHandler = outline.NewShadowsocksHandlers(
+	options := []outline.Option{
 		outline.WithLogger(h.logger),
 		outline.WithCiphers(ciphers),
 		outline.WithMetrics(h.metrics),
 		outline.WithReplayCache(replayCache),
-	)
+	}
+	if h.diagnostics != nil {
+		// This is the same validator and timeout used by the core handler's
+		// default listener. Wrapping the existing PacketListener interface keeps
+		// DNS deadlines, destination validation, and UDP routing in the service.
+		options = append(options, outline.WithPacketListener(&diagnosticPacketListener{
+			inner: outline.MakeTargetUDPListener(onet.RequirePublicIP, defaultNatTimeout, 0),
+		}))
+	}
+	h.streamHandler, h.associationHandler = outline.NewShadowsocksHandlers(options...)
 	return nil
 }
 
@@ -132,7 +144,18 @@ func (h *ShadowsocksHandler) Handle(cx *layer4.Connection, _ layer4.Handler) err
 	case StreamConnectionType:
 		h.streamHandler.HandleStream(cx.Context, cx.Conn.(transport.StreamConn), h.metrics.AddOpenTCPConnection(cx))
 	case PacketConnectionType:
-		h.associationHandler.HandleAssociation(cx.Context, cx.Conn, h.metrics.AddOpenUDPAssociation(cx))
+		if h.diagnostics == nil {
+			h.associationHandler.HandleAssociation(cx.Context, cx.Conn, h.metrics.AddOpenUDPAssociation(cx))
+			break
+		}
+		association := h.diagnostics.begin(h.logger, udpTransportFromContext(cx.Context))
+		defer association.handlerCompleted()
+		associationCtx := contextWithUDPDiagnostics(cx.Context, association)
+		associationMetrics := &diagnosticUDPAssociationMetrics{
+			inner:       h.metrics.AddOpenUDPAssociation(cx),
+			association: association,
+		}
+		h.associationHandler.HandleAssociation(associationCtx, cx.Conn, associationMetrics)
 	}
 	return nil
 }
