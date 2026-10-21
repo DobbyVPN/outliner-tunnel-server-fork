@@ -55,8 +55,11 @@ func (ln *udpListener) ListenPacket(ctx context.Context) (net.PacketConn, error)
 	if err != nil {
 		return nil, err
 	}
-	return &validatingPacketConn{
-		PacketConn:        &timedPacketConn{PacketConn: conn, defaultTimeout: ln.timeout},
-		targetIPValidator: ln.targetIPValidator,
+	return &timedPacketConn{
+		PacketConn: &validatingPacketConn{
+			PacketConn:        conn,
+			targetIPValidator: ln.targetIPValidator,
+		},
+		defaultTimeout: ln.timeout,
 	}, nil
 }

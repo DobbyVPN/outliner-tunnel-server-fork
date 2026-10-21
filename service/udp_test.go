@@ -17,6 +17,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -72,19 +73,167 @@ func WrapWithValidatingPacketListener(conn net.PacketConn, targetIPValidator one
 	}
 }
 
+func wrapWithTimedValidatingPacketListener(conn net.PacketConn, targetIPValidator onet.TargetIPValidator, timeout time.Duration) transport.PacketListener {
+	return &packetListener{
+		conn: &timedPacketConn{
+			PacketConn: &validatingPacketConn{
+				PacketConn:        conn,
+				targetIPValidator: targetIPValidator,
+			},
+			defaultTimeout: timeout,
+		},
+	}
+}
+
+func registerTestPacketServeCleanup(t *testing.T, clientConn, targetConn *fakePacketConn) {
+	t.Helper()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		select {
+		case <-targetConn.closed:
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for the target connection to close")
+		}
+	})
+}
+
 type fakePacketConn struct {
 	net.PacketConn
-	send     chan fakePacket
-	recv     chan fakePacket
-	deadline time.Time
-	mu       sync.Mutex
+	send      chan fakePacket
+	recv      chan fakePacket
+	closed    chan struct{}
+	deadline  time.Time
+	closedNow bool
+	closeOnce sync.Once
+	mu        sync.Mutex
 }
 
 func makePacketConn() *fakePacketConn {
 	return &fakePacketConn{
-		send: make(chan fakePacket, 1),
-		recv: make(chan fakePacket),
+		send:   make(chan fakePacket, 1),
+		recv:   make(chan fakePacket),
+		closed: make(chan struct{}),
 	}
+}
+
+type trackedPacketConn struct {
+	*fakePacketConn
+	readStarted  chan struct{}
+	readReturned chan struct{}
+}
+
+func makeTrackedPacketConn() *trackedPacketConn {
+	return &trackedPacketConn{
+		fakePacketConn: makePacketConn(),
+		readStarted:    make(chan struct{}, 8),
+		readReturned:   make(chan struct{}, 8),
+	}
+}
+
+func (conn *trackedPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	conn.readStarted <- struct{}{}
+	n, addr, err := conn.fakePacketConn.ReadFrom(buffer)
+	conn.readReturned <- struct{}{}
+	return n, addr, err
+}
+
+type handlerTestConn struct {
+	input        chan []byte
+	writes       chan []byte
+	readStarted  chan struct{}
+	writeStarted chan struct{}
+	closed       chan struct{}
+	readEOF      chan struct{}
+	blockedWrite <-chan struct{}
+	closeOnce    sync.Once
+	readEOFOnce  sync.Once
+}
+
+func makeHandlerTestConn() *handlerTestConn {
+	return &handlerTestConn{
+		input:        make(chan []byte),
+		writes:       make(chan []byte, 1),
+		readStarted:  make(chan struct{}, 8),
+		writeStarted: make(chan struct{}, 1),
+		closed:       make(chan struct{}),
+		readEOF:      make(chan struct{}),
+	}
+}
+
+func (conn *handlerTestConn) Read(buffer []byte) (int, error) {
+	select {
+	case conn.readStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-conn.closed:
+		return 0, net.ErrClosed
+	case <-conn.readEOF:
+		return 0, io.EOF
+	case payload := <-conn.input:
+		n := copy(buffer, payload)
+		if n < len(payload) {
+			return n, io.ErrShortBuffer
+		}
+		return n, nil
+	}
+}
+
+func (conn *handlerTestConn) Write(payload []byte) (int, error) {
+	if conn.blockedWrite != nil {
+		select {
+		case conn.writeStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-conn.closed:
+			return 0, net.ErrClosed
+		case <-conn.blockedWrite:
+		}
+	}
+	select {
+	case <-conn.closed:
+		return 0, net.ErrClosed
+	default:
+		conn.writes <- append([]byte(nil), payload...)
+		return len(payload), nil
+	}
+}
+
+func (conn *handlerTestConn) Close() error {
+	conn.closeOnce.Do(func() { close(conn.closed) })
+	return nil
+}
+
+func (conn *handlerTestConn) LocalAddr() net.Addr              { return &localAddr }
+func (conn *handlerTestConn) RemoteAddr() net.Addr             { return &clientAddr }
+func (conn *handlerTestConn) SetDeadline(time.Time) error      { return nil }
+func (conn *handlerTestConn) SetReadDeadline(time.Time) error  { return nil }
+func (conn *handlerTestConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (conn *handlerTestConn) send(payload []byte) {
+	conn.input <- payload
+}
+
+func (conn *handlerTestConn) halfCloseRead() {
+	conn.readEOFOnce.Do(func() { close(conn.readEOF) })
+}
+
+func waitForTestSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func makeEncryptedUDPPacket(t *testing.T, addr net.Addr, key *shadowsocks.EncryptionKey, payload []byte) []byte {
+	t.Helper()
+	plaintext := append(append([]byte(nil), socks.ParseAddr(addr.String())...), payload...)
+	ciphertext, err := shadowsocks.Pack(make([]byte, key.SaltSize()+len(plaintext)+key.TagSize()), plaintext, key)
+	require.NoError(t, err)
+	return ciphertext
 }
 
 func (conn *fakePacketConn) getReadDeadline() time.Time {
@@ -103,16 +252,11 @@ func (conn *fakePacketConn) SetReadDeadline(deadline time.Time) error {
 func (conn *fakePacketConn) WriteTo(payload []byte, addr net.Addr) (int, error) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-
-	var err error
-	defer func() {
-		if recover() != nil {
-			err = net.ErrClosed
-		}
-	}()
-
+	if conn.closedNow {
+		return 0, net.ErrClosed
+	}
 	conn.send <- fakePacket{addr, payload, nil}
-	return len(payload), err
+	return len(payload), nil
 }
 
 func (conn *fakePacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
@@ -130,8 +274,12 @@ func (conn *fakePacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
 func (conn *fakePacketConn) Close() error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	close(conn.send)
-	close(conn.recv)
+	conn.closeOnce.Do(func() {
+		conn.closedNow = true
+		close(conn.closed)
+		close(conn.send)
+		close(conn.recv)
+	})
 	return nil
 }
 
@@ -161,9 +309,10 @@ func (m *natTestMetrics) AddNATEntry() {
 func (m *natTestMetrics) RemoveNATEntry() {}
 
 type fakeUDPAssociationMetrics struct {
-	accessKey       string
-	upstreamPackets []udpReport
-	mu              sync.Mutex
+	accessKey         string
+	upstreamPackets   []udpReport
+	downstreamPackets []udpReport
+	mu                sync.Mutex
 }
 
 var _ UDPAssociationMetrics = (*fakeUDPAssociationMetrics)(nil)
@@ -181,6 +330,9 @@ func (m *fakeUDPAssociationMetrics) AddPacketFromClient(status string, clientPro
 }
 
 func (m *fakeUDPAssociationMetrics) AddPacketFromTarget(status string, targetProxyBytes, proxyClientBytes int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.downstreamPackets = append(m.downstreamPackets, udpReport{m.accessKey, status, targetProxyBytes, proxyClientBytes})
 }
 
 func (m *fakeUDPAssociationMetrics) AddClose() {}
@@ -201,16 +353,17 @@ func sendSSPayload(conn *fakePacketConn, addr net.Addr, cipher *shadowsocks.Encr
 // startTestHandler creates a new association handler with a fake
 // client and target connection for testing purposes. It also starts a
 // PacketServe goroutine to handle incoming packets on the client connection.
-func startTestHandler() (AssociationHandler, func(target net.Addr, payload []byte), *fakePacketConn) {
+func startTestHandler(t *testing.T) (AssociationHandler, func(target net.Addr, payload []byte), *fakePacketConn) {
 	ciphers, _ := MakeTestCiphers([]string{"asdf"})
 	cipher := ciphers.SnapshotForClientIP(netip.Addr{})[0].Value.(*CipherEntry).CryptoKey
 	handler := NewAssociationHandler(ciphers, nil)
 	clientConn := makePacketConn()
 	targetConn := makePacketConn()
-	handler.SetTargetPacketListener(&packetListener{targetConn})
+	handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, allowAll, timeout))
 	go PacketServe(clientConn, func(ctx context.Context, conn net.Conn) {
 		handler.HandleAssociation(ctx, conn, &fakeUDPAssociationMetrics{})
 	}, &natTestMetrics{})
+	registerTestPacketServeCleanup(t, clientConn, targetConn)
 	return handler, func(target net.Addr, payload []byte) {
 		sendSSPayload(clientConn, target, cipher, payload)
 	}, targetConn
@@ -234,7 +387,7 @@ func TestAssociationCloseWhileReading(t *testing.T) {
 
 func TestAssociationHandler_Handle_IPFilter(t *testing.T) {
 	t.Run("RequirePublicIP blocks localhost", func(t *testing.T) {
-		handler, sendPayload, targetConn := startTestHandler()
+		handler, sendPayload, targetConn := startTestHandler(t)
 		handler.SetTargetPacketListener(WrapWithValidatingPacketListener(targetConn, onet.RequirePublicIP))
 
 		sendPayload(&localAddr, []byte{1, 2, 3})
@@ -248,7 +401,7 @@ func TestAssociationHandler_Handle_IPFilter(t *testing.T) {
 	})
 
 	t.Run("allowAll allows localhost", func(t *testing.T) {
-		handler, sendPayload, targetConn := startTestHandler()
+		handler, sendPayload, targetConn := startTestHandler(t)
 		handler.SetTargetPacketListener(WrapWithValidatingPacketListener(targetConn, allowAll))
 
 		sendPayload(&localAddr, []byte{1, 2, 3})
@@ -266,11 +419,12 @@ func TestUpstreamMetrics(t *testing.T) {
 	handler := NewAssociationHandler(ciphers, nil)
 	clientConn := makePacketConn()
 	targetConn := makePacketConn()
-	handler.SetTargetPacketListener(&packetListener{targetConn})
+	handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, allowAll, timeout))
 	metrics := &fakeUDPAssociationMetrics{}
 	go PacketServe(clientConn, func(ctx context.Context, conn net.Conn) {
 		handler.HandleAssociation(ctx, conn, metrics)
 	}, &natTestMetrics{})
+	registerTestPacketServeCleanup(t, clientConn, targetConn)
 
 	// Test both the first-packet and subsequent-packet cases.
 	const N = 10
@@ -318,9 +472,172 @@ func (e *fakeTimeoutError) Temporary() bool {
 	return false
 }
 
+func startDirectAssociation(t *testing.T, validator onet.TargetIPValidator, timeout time.Duration) (*handlerTestConn, *trackedPacketConn, *shadowsocks.EncryptionKey, context.CancelFunc, <-chan struct{}, *fakeUDPAssociationMetrics) {
+	t.Helper()
+	ciphers, err := MakeTestCiphers([]string{"asdf"})
+	require.NoError(t, err)
+	key := ciphers.SnapshotForClientIP(netip.Addr{})[0].Value.(*CipherEntry).CryptoKey
+	clientConn := makeHandlerTestConn()
+	targetConn := makeTrackedPacketConn()
+	metrics := &fakeUDPAssociationMetrics{}
+	handler := NewAssociationHandler(ciphers, nil)
+	handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, validator, timeout))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		handler.HandleAssociation(ctx, clientConn, metrics)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = clientConn.Close()
+		_ = targetConn.Close()
+	})
+	waitForTestSignal(t, clientConn.readStarted, "the initial client read")
+	return clientConn, targetConn, key, cancel, done, metrics
+}
+
+func assertAssociationRelayStopped(t *testing.T, targetConn *trackedPacketConn, done <-chan struct{}) {
+	t.Helper()
+	waitForTestSignal(t, targetConn.closed, "the target connection to close")
+	waitForTestSignal(t, targetConn.readReturned, "the reverse relay read to return")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the association and reverse relay to stop")
+	}
+}
+
+func TestAssociationHandlerRejectedFirstDisconnectClosesTargetAndStopsRelay(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("cycle_%02d", i), func(t *testing.T) {
+			clientConn, targetConn, key, _, done, _ := startDirectAssociation(t, onet.RequirePublicIP, timeout)
+			clientConn.send(makeEncryptedUDPPacket(t, &localAddr, key, []byte{1}))
+			waitForTestSignal(t, clientConn.readStarted, "the client read after the rejected packet")
+			waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+
+			assertAlmostEqual(t, targetConn.getReadDeadline(), time.Now().Add(timeout))
+			select {
+			case <-targetConn.send:
+				t.Fatal("rejected destination packet was sent to the target")
+			default:
+			}
+
+			// Closing the client connection simulates a client disconnect while
+			// the handler is blocked on its next read.
+			require.NoError(t, clientConn.Close())
+			assertAssociationRelayStopped(t, targetConn, done)
+		})
+	}
+}
+
+func TestAssociationHandlerCancellationClosesTargetAndStopsRelay(t *testing.T) {
+	clientConn, targetConn, key, cancel, done, _ := startDirectAssociation(t, allowAll, timeout)
+	clientConn.send(makeEncryptedUDPPacket(t, &targetAddr, key, []byte{1}))
+	waitForTestSignal(t, clientConn.readStarted, "the client read after the first packet")
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+	require.Equal(t, []byte{1}, (<-targetConn.send).payload)
+
+	cancel()
+	assertAssociationRelayStopped(t, targetConn, done)
+}
+
+func TestAssociationHandlerClientReadHalfCloseInterruptsBlockedRelayWrite(t *testing.T) {
+	clientConn, targetConn, key, _, done, _ := startDirectAssociation(t, allowAll, timeout)
+	clientConn.blockedWrite = make(chan struct{})
+	clientConn.send(makeEncryptedUDPPacket(t, &targetAddr, key, []byte{1}))
+	waitForTestSignal(t, clientConn.readStarted, "the client read after the first packet")
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+	require.Equal(t, []byte{1}, (<-targetConn.send).payload)
+
+	targetConn.recv <- fakePacket{addr: &targetAddr, payload: []byte{2}}
+	waitForTestSignal(t, clientConn.writeStarted, "the reverse relay to block writing to the client")
+	clientConn.halfCloseRead()
+
+	assertAssociationRelayStopped(t, targetConn, done)
+	select {
+	case <-clientConn.closed:
+	default:
+		t.Fatal("handler did not close the client connection after read EOF")
+	}
+}
+
+func TestAssociationHandlerTargetTimeoutClosesTargetAndStopsRelay(t *testing.T) {
+	clientConn, targetConn, key, _, done, _ := startDirectAssociation(t, allowAll, timeout)
+	clientConn.send(makeEncryptedUDPPacket(t, &targetAddr, key, []byte{1}))
+	waitForTestSignal(t, clientConn.readStarted, "the client read after the first packet")
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+	require.Equal(t, []byte{1}, (<-targetConn.send).payload)
+
+	targetConn.recv <- fakePacket{err: &fakeTimeoutError{}}
+	assertAssociationRelayStopped(t, targetConn, done)
+}
+
+func TestAssociationHandlerWrappedClosedErrorClosesTargetAndStopsRelay(t *testing.T) {
+	clientConn, targetConn, key, _, done, metrics := startDirectAssociation(t, allowAll, timeout)
+	clientConn.send(makeEncryptedUDPPacket(t, &targetAddr, key, []byte{1}))
+	waitForTestSignal(t, clientConn.readStarted, "the client read after the first packet")
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+	require.Equal(t, []byte{1}, (<-targetConn.send).payload)
+
+	targetConn.recv <- fakePacket{err: fmt.Errorf("read wrapper: %w", net.ErrClosed)}
+	assertAssociationRelayStopped(t, targetConn, done)
+	metrics.mu.Lock()
+	require.Len(t, metrics.downstreamPackets, 1)
+	require.Equal(t, "ERR_READ", metrics.downstreamPackets[0].status)
+	metrics.mu.Unlock()
+}
+
+func TestAssociationHandlerRecoverableTargetReadErrorContinuesRelay(t *testing.T) {
+	clientConn, targetConn, key, _, done, _ := startDirectAssociation(t, allowAll, timeout)
+	clientConn.send(makeEncryptedUDPPacket(t, &targetAddr, key, []byte{1}))
+	waitForTestSignal(t, clientConn.readStarted, "the client read after the first packet")
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to start")
+	require.Equal(t, []byte{1}, (<-targetConn.send).payload)
+
+	targetConn.recv <- fakePacket{err: io.ErrUnexpectedEOF}
+	waitForTestSignal(t, targetConn.readStarted, "the reverse relay to retry after a recoverable error")
+	targetConn.recv <- fakePacket{addr: &targetAddr, payload: []byte{2}}
+	select {
+	case response := <-clientConn.writes:
+		require.NotEmpty(t, response, "the target response should be relayed to the client")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the reverse relay to forward a response")
+	}
+
+	clientConn.Close()
+	assertAssociationRelayStopped(t, targetConn, done)
+}
+
+func TestRejectedDestinationStartsTargetTimeout(t *testing.T) {
+	const idleTimeout = 50 * time.Millisecond
+	listener := MakeTargetUDPListener(onet.RequirePublicIP, idleTimeout, 0)
+	targetConn, err := listener.ListenPacket(context.Background())
+	require.NoError(t, err)
+	defer targetConn.Close()
+
+	_, err = targetConn.WriteTo([]byte{1}, &localAddr)
+	require.Error(t, err, "the local target must be rejected")
+
+	type readResult struct{ err error }
+	readDone := make(chan readResult, 1)
+	go func() {
+		_, _, readErr := targetConn.ReadFrom(make([]byte, 32))
+		readDone <- readResult{err: readErr}
+	}()
+	select {
+	case result := <-readDone:
+		var netErr net.Error
+		require.ErrorAs(t, result.err, &netErr)
+		require.True(t, netErr.Timeout(), "expected the rejected first destination to start the idle timeout")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the target inactivity deadline")
+	}
+}
+
 func TestTimedPacketConn(t *testing.T) {
 	t.Run("Write", func(t *testing.T) {
-		_, sendPayload, targetConn := startTestHandler()
+		_, sendPayload, targetConn := startTestHandler(t)
 
 		buf := []byte{1}
 		sendPayload(&targetAddr, buf)
@@ -334,7 +651,7 @@ func TestTimedPacketConn(t *testing.T) {
 	})
 
 	t.Run("WriteDNS", func(t *testing.T) {
-		_, sendPayload, targetConn := startTestHandler()
+		_, sendPayload, targetConn := startTestHandler(t)
 
 		// Simulate one DNS query being sent.
 		buf := []byte{1}
@@ -350,7 +667,7 @@ func TestTimedPacketConn(t *testing.T) {
 	})
 
 	t.Run("WriteDNSMultiple", func(t *testing.T) {
-		_, sendPayload, targetConn := startTestHandler()
+		_, sendPayload, targetConn := startTestHandler(t)
 
 		// Simulate three DNS queries being sent.
 		buf := []byte{1}
@@ -366,7 +683,7 @@ func TestTimedPacketConn(t *testing.T) {
 	})
 
 	t.Run("WriteMixed", func(t *testing.T) {
-		_, sendPayload, targetConn := startTestHandler()
+		_, sendPayload, targetConn := startTestHandler(t)
 
 		// Simulate both non-DNS and DNS packets being sent.
 		buf := []byte{1}
@@ -385,10 +702,11 @@ func TestTimedPacketConn(t *testing.T) {
 		handler := NewAssociationHandler(ciphers, nil)
 		clientConn := makePacketConn()
 		targetConn := makePacketConn()
-		handler.SetTargetPacketListener(&packetListener{targetConn})
+		handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, allowAll, timeout))
 		go PacketServe(clientConn, func(ctx context.Context, conn net.Conn) {
 			handler.HandleAssociation(ctx, conn, &fakeUDPAssociationMetrics{})
 		}, &natTestMetrics{})
+		registerTestPacketServeCleanup(t, clientConn, targetConn)
 
 		// Send one DNS query.
 		sendSSPayload(clientConn, &dnsAddr, cipher, []byte{1})
@@ -413,10 +731,11 @@ func TestTimedPacketConn(t *testing.T) {
 		handler := NewAssociationHandler(ciphers, nil)
 		clientConn := makePacketConn()
 		targetConn := makePacketConn()
-		handler.SetTargetPacketListener(&packetListener{targetConn})
+		handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, allowAll, timeout))
 		go PacketServe(clientConn, func(ctx context.Context, conn net.Conn) {
 			handler.HandleAssociation(ctx, conn, &fakeUDPAssociationMetrics{})
 		}, &natTestMetrics{})
+		registerTestPacketServeCleanup(t, clientConn, targetConn)
 
 		// Send one non-DNS packet.
 		sendSSPayload(clientConn, &targetAddr, cipher, []byte{1})
@@ -441,10 +760,11 @@ func TestTimedPacketConn(t *testing.T) {
 		handler := NewAssociationHandler(ciphers, nil)
 		clientConn := makePacketConn()
 		targetConn := makePacketConn()
-		handler.SetTargetPacketListener(&packetListener{targetConn})
+		handler.SetTargetPacketListener(wrapWithTimedValidatingPacketListener(targetConn, allowAll, timeout))
 		go PacketServe(clientConn, func(ctx context.Context, conn net.Conn) {
 			handler.HandleAssociation(ctx, conn, &fakeUDPAssociationMetrics{})
 		}, &natTestMetrics{})
+		registerTestPacketServeCleanup(t, clientConn, targetConn)
 
 		// Send two DNS packets.
 		sendSSPayload(clientConn, &dnsAddr, cipher, []byte{1})
@@ -463,7 +783,7 @@ func TestTimedPacketConn(t *testing.T) {
 	})
 
 	t.Run("Timeout", func(t *testing.T) {
-		_, sendPayload, targetConn := startTestHandler()
+		_, sendPayload, targetConn := startTestHandler(t)
 
 		// Simulate a non-DNS initial packet.
 		sendPayload(&targetAddr, []byte{1})
@@ -686,5 +1006,5 @@ func TestAssociationCloseRaceWithPacketServe(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Clean shutdown. If we get here without a panic, the race is fixed.
-	close(clientConn.recv)
+	_ = clientConn.Close()
 }

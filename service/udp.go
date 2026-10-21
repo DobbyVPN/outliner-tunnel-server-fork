@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shadowsocks/go-shadowsocks2/socks"
 	"golang.getoutline.org/sdk/transport"
 	"golang.getoutline.org/sdk/transport/shadowsocks"
-	"github.com/shadowsocks/go-shadowsocks2/socks"
 
 	"golang.getoutline.org/tunnel-server/internal/slicepool"
 	onet "golang.getoutline.org/tunnel-server/net"
@@ -142,19 +142,35 @@ func (h *associationHandler) HandleAssociation(ctx context.Context, clientConn n
 	}()
 
 	var targetConn net.PacketConn
+	var relayDone chan struct{}
+	defer func() {
+		// Closing the client before joining the relay also interrupts a reverse
+		// write if the client half-closes its read side.
+		_ = clientConn.Close()
+		if targetConn != nil {
+			_ = targetConn.Close()
+			<-relayDone
+		}
+	}()
+
+	// Closing the client connection interrupts a Read that is blocked while the
+	// association context is canceled.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
+		_ = clientConn.Close()
+	})
+	defer stopCloseOnCancel()
+
 	var cryptoKey *shadowsocks.EncryptionKey
 
 	readBufLazySlice := readBufPool.LazySlice()
 	readBuf := readBufLazySlice.Acquire()
 	defer readBufLazySlice.Release()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			break
-		default:
 		}
 		clientProxyBytes, err := clientConn.Read(readBuf)
-		if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 			debugUDP(l, "Client connection closed")
 			break
 		}
@@ -199,10 +215,12 @@ func (h *associationHandler) HandleAssociation(ctx context.Context, clientConn n
 				if err != nil {
 					return onet.NewConnectionError("ERR_CREATE_SOCKET", "Failed to create a `PacketConn`", err)
 				}
+				relayDone = make(chan struct{})
 				l = l.With(slog.Any("tgtListener", targetConn.LocalAddr()))
 				go func() {
+					defer close(relayDone)
 					relayTargetToClient(targetConn, clientConn, cryptoKey, assocMetrics, l)
-					clientConn.Close()
+					_ = clientConn.Close()
 				}()
 			} else {
 				unpackStart := time.Now()
@@ -527,8 +545,6 @@ var maxAddrLen int = len(socks.ParseAddr("[2001:db8::1]:12345"))
 
 // relayTargetToClient copies from target to client until read timeout.
 func relayTargetToClient(targetConn net.PacketConn, clientConn io.Writer, cryptoKey *shadowsocks.EncryptionKey, m UDPAssociationMetrics, l *slog.Logger) {
-	defer targetConn.Close()
-
 	// pkt is used for in-place encryption of downstream UDP packets, with the layout
 	// [padding?][salt][address][body][tag][extra]
 	// Padding is only used if the address is IPv4.
@@ -598,6 +614,9 @@ func relayTargetToClient(targetConn net.PacketConn, clientConn io.Writer, crypto
 			break
 		}
 		m.AddPacketFromTarget(status, int64(targetProxyBytes), int64(proxyClientBytes))
+		if connError != nil && errors.Is(connError, net.ErrClosed) {
+			break
+		}
 	}
 }
 
