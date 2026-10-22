@@ -1,8 +1,8 @@
 module golang.getoutline.org/tunnel-server
 
-go 1.24.1
+go 1.25.0
 
-toolchain go1.24.8
+toolchain go1.25.5
 
 require (
 	github.com/go-task/task/v3 v3.34.1
@@ -17,7 +17,7 @@ require (
 	github.com/prometheus/client_golang v1.20.5
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5
 	github.com/stretchr/testify v1.10.0
-	golang.getoutline.org/sdk v0.0.21-alpha.1
+	golang.getoutline.org/sdk v0.0.23
 	golang.getoutline.org/sdk/x v0.0.9-alpha.1
 	golang.org/x/crypto v0.42.0
 	golang.org/x/term v0.35.0
@@ -53,7 +53,7 @@ require (
 	github.com/Azure/go-autorest/logger v0.2.1 // indirect
 	github.com/Azure/go-autorest/tracing v0.6.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.2.2 // indirect
-	github.com/BurntSushi/toml v1.4.0 // indirect
+	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/Masterminds/semver/v3 v3.3.1 // indirect
@@ -222,6 +222,7 @@ require (
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/radovskyb/watcher v1.0.7 // indirect
+	github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
@@ -242,6 +243,7 @@ require (
 	github.com/spf13/viper v1.15.0 // indirect
 	github.com/src-d/gcfg v1.4.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
+	github.com/tarantool/go-gostcrypto v0.1.1-0.20260728125122-3791d459e0c3 // indirect
 	github.com/technoweenie/multipartstreamer v1.0.1 // indirect
 	github.com/theupdateframework/go-tuf v0.5.2 // indirect
 	github.com/titanous/rocacheck v0.0.0-20171023193734-afe73141d399 // indirect
@@ -290,3 +292,6 @@ require (
 	sigs.k8s.io/kind v0.17.0 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
+
+// Shared DobbyVPN extension; upstream module imports stay unchanged.
+replace golang.getoutline.org/sdk => github.com/DobbyVPN/outline-sdk v0.0.24-0.20261022143006-bace007bdf6f

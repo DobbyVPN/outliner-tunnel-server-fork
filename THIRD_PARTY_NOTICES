@@ -1,0 +1,3 @@
+The optional kuznyechik-mgm Shadowsocks method uses
+github.com/tarantool/go-gostcrypto (BSD-2-Clause).
+Its license and copyright notice are in LICENSES/go-gostcrypto-BSD-2-Clause.txt.
