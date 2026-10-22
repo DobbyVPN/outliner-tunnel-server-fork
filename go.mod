@@ -294,4 +294,4 @@ require (
 )
 
 // Shared DobbyVPN extension; upstream module imports stay unchanged.
-replace golang.getoutline.org/sdk => github.com/DobbyVPN/outline-sdk v0.0.24-0.20261022143006-bace007bdf6f
+replace golang.getoutline.org/sdk => github.com/DobbyVPN/outline-sdk-fork v0.0.24-0.20261022143006-bace007bdf6f

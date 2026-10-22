@@ -524,8 +524,8 @@ github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
 github.com/DataDog/zstd v1.4.5 h1:EndNeuB0l9syBZhut0wns3gV1hL8zX8LIu6ZiVHWLIQ=
 github.com/DataDog/zstd v1.4.5/go.mod h1:1jcaCB/ufaK+sKp1NBhlGmpz41jOoPQ35bpF36t7BBo=
-github.com/DobbyVPN/outline-sdk v0.0.24-0.20261022143006-bace007bdf6f h1:I2SOMEDTnUwu+MnpGepcjySpkqPHwpOZuBROWOneqYE=
-github.com/DobbyVPN/outline-sdk v0.0.24-0.20261022143006-bace007bdf6f/go.mod h1:Ig39Th+hP+5ZADLi+ZAZjHcBtKohljJsBU/pQ6DH1nQ=
+github.com/DobbyVPN/outline-sdk-fork v0.0.24-0.20261022143006-bace007bdf6f h1:BKvRK11yifHCYvsL7AAWSmKS4jW8YvK0VDvb+P8/ZG8=
+github.com/DobbyVPN/outline-sdk-fork v0.0.24-0.20261022143006-bace007bdf6f/go.mod h1:Ig39Th+hP+5ZADLi+ZAZjHcBtKohljJsBU/pQ6DH1nQ=
 github.com/GoogleCloudPlatform/cloudsql-proxy v1.33.2/go.mod h1:uqoR4sJc63p7ugW8a/vsEspOsNuehbi7ptS2CHCyOnY=
 github.com/HdrHistogram/hdrhistogram-go v1.1.0/go.mod h1:yDgFjdqOqDEKOvasDdhWNXYg9BVp4O+o5f6V/ehm6Oo=
 github.com/HdrHistogram/hdrhistogram-go v1.1.2/go.mod h1:yDgFjdqOqDEKOvasDdhWNXYg9BVp4O+o5f6V/ehm6Oo=
